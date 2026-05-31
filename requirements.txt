@@ -1,0 +1,5 @@
+streamlit
+google-generativeai
+pdfplumber
+PyPDF2
+numpy

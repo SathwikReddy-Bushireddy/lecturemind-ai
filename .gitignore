@@ -1,0 +1,18 @@
+# Streamlit Secrets
+.streamlit/secrets.toml
+
+# Environment Variables
+.env
+
+# Python Caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Workspace Data & Vector persisted stores
+data/
+vectorstore/
+.venv/
+env/
+venv/
