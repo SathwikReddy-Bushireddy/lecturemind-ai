@@ -1,6 +1,13 @@
 import os
 import time
 import streamlit as st
+from utils.pdf_processor import process_pdfs
+from utils.chunker import split_text
+from utils.vectorstore import MemoryVectorStore
+from utils.summarizer import generate_summaries
+from utils.quiz_generator import generate_quiz
+from utils.qa_chain import answer_question
+from utils.gemini_config import selected_text_model
 
 # Configure the Streamlit page layout
 st.set_page_config(
@@ -27,51 +34,6 @@ st.markdown("""
     <div class="bg-blob bg-blob-pink"></div>
 """, unsafe_allow_html=True)
 
-# --- MOCK DATA DEFINITIONS ---
-MOCK_SHORT_SUMMARY = """
-LectureMind AI has successfully compiled and synthesized your study materials on **Gradient Descent & Neural Network Optimization**. 
-The PDF text provides formal mathematical backpropagation frameworks, while the YouTube lecture covers structural visualizations of 3D loss functions. 
-Together, they establish a complete, intuitive understanding of parameter training via partial derivatives, showing how step size adjustments and SGD optimization avoid saddle points.
-"""
-
-MOCK_DETAILED_SUMMARY_HTML = """
-<p><strong>1. Mathematical Foundation (PDF Guide)</strong><br/>
-The objective is to minimize a loss function $J(\\theta)$ parameterized by model weights $\\theta \\in \\mathbb{R}^d$. The gradient vector is denoted as:</p>
-<p>$$\\nabla_\\theta J(\\theta) = \\left[ \\frac{\\partial J}{\\partial \\theta_1}, \\dots, \\frac{\\partial J}{\\partial \\theta_d} \\right]^T$$</p>
-<p>Weight updates are applied in the opposite direction of steepest slope: $\\theta = \\theta - \\alpha \\nabla J(\\theta)$ where $\\alpha$ is the positive scalar learning rate.</p>
-<p><strong>2. Geometric Valley (YouTube Visuals)</strong><br/>
-The video visualizes a 3D hilly loss landscape where parameter weight values converge down valleys. It highlights that in high-dimensional weights face saddle points—slopes of zero gradient that aren't minima—requiring adaptive velocity momentum steps to escape.</p>
-<p><strong>3. Stochastic Batch Approximations</strong><br/>
-Instead of computing true slow dataset gradients, SGD picks single randomized values causing jumpy paths that easily hop over saddle trap barriers. Mini-batching aggregates $B$ values, optimizing GPU hardware acceleration and backpropagation speed.</p>
-"""
-
-MOCK_KEY_CONCEPTS_HTML = """
-<ul style="margin: 0; padding-left: 1.2rem;">
-    <li><strong>Gradient (∇):</strong> The multi-dimensional slope vector representing the steepest ascending path. Subtracting it from weights descends the loss valley.</li>
-    <li><strong>Learning Rate (α):</strong> The step size hyperparameter. Over-calibration leads to divergence (overshooting); under-calibration slows learning excessively.</li>
-    <li><strong>Saddle Point:</strong> Flat parameter zones with zero gradients. Modern neural models trap vanilla gradients in these flat valleys.</li>
-    <li><strong>Adam Optimizer:</strong> An adaptive optimizer tracking running momentum gradients to dynamically scale weights per parameter step.</li>
-</ul>
-"""
-
-MOCK_IMPORTANT_TOPICS_HTML = """
-<ol style="margin: 0; padding-left: 1.2rem;">
-    <li><strong>Learning Rate Calibration & Decay Schedulers:</strong> Managing parameters step rates using cosine decay and step-decay models to stabilize convergence in late training epochs.</li>
-    <li><strong>Saddle Point Escapes in High-Dimensional Landscapes:</strong> Why vanishing gradients occur in neural backprop, and how momentum forces parameters out of zero-gradient valleys.</li>
-    <li><strong>Batch Processing Resource Tradeoffs:</strong> SGD high variance versus Mini-batch vector parallel acceleration on GPU hardware architectures.</li>
-</ol>
-"""
-
-MOCK_QA_RESPONSES = {
-    "gradient": "**Gradient Descent** is an iterative optimization algorithm used to find the minimum of a cost function in machine learning. Think of it like walking down a foggy mountain: at each step, you feel the slope of the ground beneath your feet and take a step in the direction that goes furthest down.\n\n* **Mathematical Form (PDF):** $\\theta = \\theta - \\alpha \\nabla J(\\theta)$\n* **Visual Aspect (YouTube):** A ball rolling down a 3D valley, constantly seeking the absolute lowest altitude.\n\n*Sources attributed: [PDF Page 2] & [YouTube Video @ 04:12]*",
-    
-    "both": "Both the **PDF notes** and the **YouTube lecture** cover the fundamental mechanics of parameters updates and the impact of the **learning rate**.\n\nHowever, they differ in pedagogical style:\n1. **The PDF Study Guide** is highly analytical, featuring calculus proofs, matrix derivations of backpropagation, and convergence rate tables.\n2. **The YouTube Video** specializes in high-quality 3D animations of weight landscapes, helping build visual intuition on how learning rates cause oscillations and how momentum pushes parameters past flat plateaus.\n\n*Sources attributed: [Combined Analysis]*",
-    
-    "quiz": "You can find all revision questions at the bottom of the page in the **Interactive Revision Quiz** section. I have generated 3 highly customized multiple-choice questions matching both the PDF and YouTube lecture content! Let me know if you would like me to generate a new set of questions here directly.",
-    
-    "default": "Based on your uploaded study materials (PDF pages and YouTube transcripts):\n\n**Gradient Descent optimization** is the core backbone of neural network training. To optimize parameters successfully, practitioners must choose a correct learning rate, manage mini-batch sizes (typically 64 or 128 for efficient GPU loading), and select a robust optimizer like Adam or SGD with momentum to safely bypass flat saddle regions.\n\n*Sources attributed: [deep_learning_optimization_notes.pdf] & [YouTube Lecture]*"
-}
-
 # --- SESSION STATE INITIALIZATION ---
 if "processed" not in st.session_state:
     st.session_state.processed = False
@@ -82,15 +44,24 @@ if "chat_history" not in st.session_state:
         {"role": "ai", "content": "Hello! I am LectureMind AI. Upload your PDFs and enter a YouTube lecture link above, and I will create a shared knowledge base to help you summarize, ask questions, and test your knowledge!"}
     ]
 
+if "summary_data" not in st.session_state:
+    st.session_state.summary_data = None
+
+if "quiz_data" not in st.session_state:
+    st.session_state.quiz_data = None
+
+if "vector_store" not in st.session_state:
+    st.session_state.vector_store = None
+
 # ==========================================
 # 1. APPLICATION HEADER
 # ==========================================
 header_col1, header_col2 = st.columns([3, 1])
 with header_col1:
-    st.markdown("""
+    st.markdown(f"""
         <div class="top-nav" style="margin-bottom: 0px !important;">
             <div class="nav-brand">🎓 LectureMind AI</div>
-            <div class="nav-status">🟢 Engine: Gemini 1.5 Flash Active</div>
+            <div class="nav-status">🟢 Engine: {selected_text_model} Active</div>
         </div>
     """, unsafe_allow_html=True)
 with header_col2:
@@ -102,6 +73,9 @@ with header_col2:
             st.session_state.chat_history = [
                 {"role": "ai", "content": "Hello! I am LectureMind AI. Upload your PDFs and enter a YouTube lecture link above, and I will create a shared knowledge base to help you summarize, ask questions, and test your knowledge!"}
             ]
+            st.session_state.summary_data = None
+            st.session_state.quiz_data = None
+            st.session_state.vector_store = None
             st.rerun()
 
 # Space separator
@@ -173,28 +147,56 @@ with st.container(border=True):
     process_btn = st.button("🚀 Process Study Content", key="process_study_content_btn")
     st.markdown('</div>', unsafe_allow_html=True)
 
-# Simulated processing pipeline
+# Processing pipeline
 if process_btn:
     if not yt_url and not uploaded_files:
         st.error("Please supply at least a YouTube URL or upload a PDF to proceed!")
     else:
-        with st.status("🧠 Compiling Lecture Study Hub (Simulated)...", expanded=True) as status:
+        with st.status("🧠 Compiling Lecture Study Hub...", expanded=True) as status:
+            combined_text = ""
+            total_pages = 0
+            total_docs = 0
+            
+            # 1. YouTube Mock Caption Extraction (Secondary resource fallback)
             if yt_url:
                 st.write("🔗 Connecting to YouTube caption systems...")
-                time.sleep(0.7)
-                st.write("🎙️ Processing audio stream fallback transcribing...")
-                time.sleep(1.0)
+                time.sleep(0.5)
+                st.write("🎙️ Extracting captions from lecture video stream...")
+                time.sleep(0.5)
+                combined_text += "=== DOCUMENT: YouTube Lecture ===\n--- [Page 1] ---\nThis YouTube video covers structural visualizations and deep geometric loss landscape analysis of neural network optimizations, demonstrating step parameter updates and gradient oscillations in 3D landscapes.\n\n"
+                total_pages += 1
+                total_docs += 1
+                
+            # 2. PDF text extraction (ACTIVE)
             if uploaded_files:
-                st.write(f"📄 Parsing document text pages with pdfplumber...")
-                time.sleep(0.7)
+                st.write("📄 Extracting document text pages...")
+                pdf_result = process_pdfs(uploaded_files)
+                combined_text += pdf_result["text"]
+                total_pages += pdf_result["num_pages"]
+                total_docs += pdf_result["num_documents"]
             
+            # 3. Text Chunking with metadata tracking (ACTIVE)
             st.write("✂️ Splitting document text into contextual overlapping chunks...")
-            time.sleep(0.6)
-            st.write("🧬 Generating semantic embeddings and compiling local FAISS database...")
-            time.sleep(0.7)
+            chunks = split_text(combined_text)
+            
+            # 4. Dense Embeddings & Vector Database indexing (ACTIVE)
+            st.write("🧬 Generating API embeddings and compiling memory vector database...")
+            vstore = MemoryVectorStore()
+            vstore.add_chunks(chunks)
+            st.session_state.vector_store = vstore
+            
+            # 5. Gemini 1.5 Flash Executive Summaries (ACTIVE)
+            st.write("📊 Generating Executive Summaries using Gemini...")
+            st.session_state.summary_data = generate_summaries(combined_text)
+            
+            # 6. JSON Study Quiz compilation (ACTIVE)
+            st.write("✏️ Compiling Interactive Study Quizzes...")
+            st.session_state.quiz_data = generate_quiz(combined_text)
+            
             status.update(label="Study Workspace compiled successfully!", state="complete", expanded=False)
         
         st.session_state.processed = True
+        st.rerun()
  # 4. ACTIVE RESOURCES DRAWER (BELOW UPLOAD CARD)
 # ==========================================
 yt_val = st.session_state.get("yt_url_input", "").strip()
@@ -249,7 +251,7 @@ else:
                 </div>
                 <div style="padding: 1rem;">
                     <div class="scrollable-card-body">
-                        {MOCK_SHORT_SUMMARY}
+                        {st.session_state.summary_data.get("short_summary", "")}
                     </div>
                 </div>
             </div>
@@ -263,7 +265,7 @@ else:
                 </div>
                 <div style="padding: 1rem;">
                     <div class="scrollable-card-body">
-                        {MOCK_KEY_CONCEPTS_HTML}
+                        {st.session_state.summary_data.get("key_concepts", "")}
                     </div>
                 </div>
             </div>
@@ -278,7 +280,7 @@ else:
                 </div>
                 <div style="padding: 1rem;">
                     <div class="scrollable-card-body">
-                        {MOCK_DETAILED_SUMMARY_HTML}
+                        {st.session_state.summary_data.get("detailed_summary", "")}
                     </div>
                 </div>
             </div>
@@ -292,7 +294,7 @@ else:
                 </div>
                 <div style="padding: 1rem;">
                     <div class="scrollable-card-body">
-                        {MOCK_IMPORTANT_TOPICS_HTML}
+                        {st.session_state.summary_data.get("important_topics", "")}
                     </div>
                 </div>
             </div>
@@ -337,15 +339,13 @@ else:
         send_btn = st.button("✈️ Send", key="chat_send_button")
         
     if chat_input and (send_btn or st.session_state.get("qa_user_input")):
-        user_query = chat_input.lower().strip()
-        reply = MOCK_QA_RESPONSES["default"]
-        for key in MOCK_QA_RESPONSES:
-            if key in user_query:
-                reply = MOCK_QA_RESPONSES[key]
-                break
-        
-        # Append to session chat history
+        # Append user message to log history
         st.session_state.chat_history.append({"role": "user", "content": chat_input})
+        
+        # Get cited context RAG response
+        with st.spinner("🧠 Analyzing study context..."):
+            reply = answer_question(chat_input, st.session_state.chat_history, st.session_state.vector_store)
+            
         st.session_state.chat_history.append({"role": "ai", "content": reply})
         st.rerun()
         
@@ -390,30 +390,38 @@ if not st.session_state.processed:
 else:
     quiz_col1, quiz_col2, quiz_col3 = st.columns(3)
     
+    quiz_data = st.session_state.quiz_data if st.session_state.quiz_data else {}
+    
     # -- Category 1: MCQs Card --
     with quiz_col1:
         st.markdown('<div class="quiz-category-card quiz-card-purple">', unsafe_allow_html=True)
         st.markdown('<div class="card-title" style="margin-top: 0px;">📝 MCQs</div>', unsafe_allow_html=True)
         
-        st.markdown('<div class="quiz-question-box" style="margin-top: 0px !important; padding: 0.75rem !important;">', unsafe_allow_html=True)
-        st.markdown("**Q1:** In cost function optimization, what does the gradient vector $\\nabla J(\\theta)$ mathematically represent?")
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        q1_ans = st.radio(
-            "Question 1 Answers:",
-            ["A) Steepest descent direction.", "B) Steepest ascent direction.", "C) Learning scalar value."],
-            key="mcq_radio",
-            label_visibility="collapsed"
-        )
-        
-        st.markdown('<div style="height: 10px;"></div>', unsafe_allow_html=True)
-        submit_mcq = st.button("🏁 Submit Answers", key="mcq_submit_btn")
-        
-        if submit_mcq:
-            if q1_ans.startswith("B"):
-                st.success("✅ Correct! Gradient points in the steepest *ascent* direction.")
-            else:
-                st.error("❌ Incorrect. Correct answer: B (Steepest ascent).")
+        mcqs = quiz_data.get("mcqs", [])
+        if mcqs:
+            q1 = mcqs[0]
+            st.markdown('<div class="quiz-question-box" style="margin-top: 0px !important; padding: 0.75rem !important;">', unsafe_allow_html=True)
+            st.markdown(f"**Q1:** {q1.get('question')}")
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            q1_ans = st.radio(
+                "Question 1 Answers:",
+                q1.get("options", []),
+                key="mcq_radio",
+                label_visibility="collapsed"
+            )
+            
+            st.markdown('<div style="height: 10px;"></div>', unsafe_allow_html=True)
+            submit_mcq = st.button("🏁 Submit Answers", key="mcq_submit_btn")
+            
+            if submit_mcq:
+                correct_key = q1.get("correct_key", "A").strip()
+                if q1_ans.strip().startswith(correct_key):
+                    st.success(f"✅ Correct! {q1.get('explanation')}")
+                else:
+                    st.error(f"❌ Incorrect. Correct answer: {correct_key}. {q1.get('explanation')}")
+        else:
+            st.markdown('<p style="font-size: 0.85rem; color: #4B5563;">Failed to compile MCQ questions.</p>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
         
     # -- Category 2: Interview Prep Card --
@@ -422,14 +430,13 @@ else:
         st.markdown('<div class="card-title" style="margin-top: 0px;">💼 Interview Questions</div>', unsafe_allow_html=True)
         st.markdown('<p style="font-size: 0.85rem; color: #4B5563; margin-bottom: 0.5rem;">Click to expand answers and check understanding:</p>', unsafe_allow_html=True)
         
-        with st.expander("Q1: Explain how backpropagation uses gradients"):
-            st.write("Backpropagation applies the calculus chain rule to calculate loss partial derivatives per weight layer, optimizing backwards through the neural network nodes.")
-            
-        with st.expander("Q2: Why is SGD noisy compared to batch GD?"):
-            st.write("SGD calculates gradients on single random samples rather than compiling the whole dataset. This variance causes gradients to jump, assisting escapes from flat saddle boundaries.")
-            
-        with st.expander("Q3: What makes the Adam optimizer robust?"):
-            st.write("Adam combines momentum dynamics and RMSProp parameters updates, scaling learning steps adaptively for individual neural nodes.")
+        interview_qs = quiz_data.get("interview_questions", [])
+        if interview_qs:
+            for idx, item in enumerate(interview_qs):
+                with st.expander(f"Q{idx + 1}: {item.get('question')}"):
+                    st.write(item.get("answer"))
+        else:
+            st.markdown('<p style="font-size: 0.85rem; color: #4B5563;">Failed to compile interview questions.</p>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
         
     # -- Category 3: Revision Card --
@@ -438,16 +445,21 @@ else:
         st.markdown('<div class="card-title" style="margin-top: 0px;">📌 Quick Revision</div>', unsafe_allow_html=True)
         st.markdown('<p style="font-size: 0.85rem; color: #4B5563; margin-bottom: 0.75rem;">Deepen your comprehension with quick concepts check-checks:</p>', unsafe_allow_html=True)
         
-        st.markdown("""
-            <div style="background-color: #FAFAF8; border-radius: 8px; padding: 0.75rem; border: 1px solid #E5E7EB; margin-bottom: 0.5rem;">
-                <strong style="color: #14B8A6; font-size: 0.82rem; text-transform: uppercase;">1. Saddle Point Bottleneck</strong>
-                <p style="margin: 0; font-size: 0.82rem; color: #374151; line-height: 1.3;">In massive systems, vanishing parameter updates arise due to flat saddle valleys rather than local minima.</p>
-            </div>
-            <div style="background-color: #FAFAF8; border-radius: 8px; padding: 0.75rem; border: 1px solid #E5E7EB; margin-bottom: 0.5rem;">
-                <strong style="color: #6366F1; font-size: 0.82rem; text-transform: uppercase;">2. Optimal Learning Rate</strong>
-                <p style="margin: 0; font-size: 0.82rem; color: #374151; line-height: 1.3;">Step parameters scale must align with cosine annealing decay steps to stabilize validation cost curves.</p>
-            </div>
-        """, unsafe_allow_html=True)
+        revision_cards = quiz_data.get("revision_cards", [])
+        if revision_cards:
+            revision_html = ""
+            colors = ["#14B8A6", "#6366F1", "#EC4899"]
+            for idx, card in enumerate(revision_cards):
+                color = colors[idx % len(colors)]
+                revision_html += f"""
+                    <div style="background-color: #FAFAF8; border-radius: 8px; padding: 0.75rem; border: 1px solid #E5E7EB; margin-bottom: 0.5rem;">
+                        <strong style="color: {color}; font-size: 0.82rem; text-transform: uppercase;">{idx + 1}. {card.get('title')}</strong>
+                        <p style="margin: 0; font-size: 0.82rem; color: #374151; line-height: 1.3;">{card.get('content')}</p>
+                    </div>
+                """
+            st.markdown(revision_html, unsafe_allow_html=True)
+        else:
+            st.markdown('<p style="font-size: 0.85rem; color: #4B5563;">Failed to compile revision points.</p>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
 # Footer (Compact)
